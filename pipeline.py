@@ -8,6 +8,15 @@ import pickle
 from PIL import Image
 import os
 
+# Notes on shape.
+# img_file = 'camera_cal/calibration1.jpg'
+# img.shape
+#   (720, 1280, 3)
+# gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+# gray.shape
+#   (720, 1280)
+# 720 is the height, 1280 is the width of the image here, 3 - channels.
+
 
 def convert_to_grayscale(img):
     return cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
@@ -67,6 +76,7 @@ def callibrate_camera(file_names, shape=(9, 6)):
 
 
 def undistort_and_save_image(output_dir, file_name, mtx, dist):
+    print('Undistorting {f} {m} {d}'.format(f=file_name, m=mtx, d=dist))
     dist = cv2.undistort(mpimg.imread(file_name), mtx, dist, None, mtx)
     im = Image.fromarray(dist)
     base_name = os.path.basename(file_name)
@@ -181,6 +191,37 @@ def combined_gradient_color_threshold(img, grad_x_thresh=(20, 100), color_thresh
     return combined_binary
 
 
+def perspective_transform(undist, src_points, dst_points, img_shape):
+    """
+    Applies perspective transform to undist, mapping src_points to dst_points.
+    This produces an image of the same size as the original image.
+
+    :param undist (numpy array) - Undistorted image.
+    :param src_points (list[points]) - List of points in the source image.
+        These are assumed to be four points provided in the following order -
+        Top left, top right, bottom left, bottom right.
+    :return returns the image after applying the perspective transform.
+    """
+    M = cv2.getPerspectiveTransform(src_points, dst_points)
+    return cv2.warpPerspective(undist, M, img_shape)
+
+
+def draw_lines(img, lines, color=[255, 0, 0], thickness=2):
+    """
+    Draws lines over the image.
+    """
+    for line in lines:
+        for x1, y1, x2, y2 in line:
+            cv2.line(img, (int(x1), int(y1)), (int(x2), int(y2)), color, thickness)
+
+
+def get_points_for_lanes(src):
+    return [
+        [(src[0][0], src[0][1], src[2][0], src[2][1])],
+        [(src[1][0], src[1][1], src[3][0], src[3][1])],
+    ]
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Process some integers.')
     parser.add_argument('-p', '--pickle_file_name', default='camera_cal.pkl',
@@ -203,16 +244,69 @@ if __name__ == '__main__':
 
     # for f in file_names:
     #    undistort_and_save_image('camera_cal_undist', f, mtx, dist)
-    img = mpimg.imread('test_images/test5.jpg')
-    dist = cv2.undistort(img, mtx, dist, None, mtx)
-    threshold_binary = combined_gradient_color_threshold(dist)
+    img = mpimg.imread('test_images/straight_lines1.jpg')
+    undist = cv2.undistort(img, mtx, dist, None, mtx)
+    src_points = np.float32([
+        [521.697, 500.501],
+        [764.666, 500.501],
+        [234.025, 699.821],
+        [1064.43, 699.821]
+    ])
+    src_points = np.float32([
+        [596.376, 450.54],
+        [677.695, 450.09],
+        [234.025, 699.821],
+        [1064.43, 699.821]
+    ])
+    src_points = np.float32([
+        [560.614, 475.258],
+        [723.645, 475.258],
+        [234.025, 699.821],
+        [1068.54, 699.821]
+    ])
+    src_points = np.float32([
+        [576.04, 464.487],
+        [707.079, 464.487],
+        [268.552, 675.317],
+        [1034.03, 675.317]
+    ])
+    # draw_lines(undist, [
+    #    [(521.697, 500.501, 234.025, 699.821)],
+    #    [(764.666, 500.501, 1064.43, 699.821)]
+    # ])
+    draw_lines(undist, get_points_for_lanes(src_points))
+
+    # Compute the matrix to transform src_points to dst_points. The first point
+    # is the axis along the width and the second is along the height.
+    offset = 10
+    gray = convert_to_grayscale(undist)
+    # img_size is width x height :-(.
+    width = gray.shape[1]
+    height = gray.shape[0]
+    dst_points = np.float32([
+        [offset, offset],
+        [width - offset, offset],
+        [offset, height - offset],
+        [width - offset, height - offset],
+    ])
+    dst_points = np.float32([
+        [268.552, offset],
+        [1034.03, offset],
+        [268.552, 675.317],
+        [1034.03, 675.317],
+    ])
+    p_transformed = perspective_transform(undist, src_points, dst_points, img_shape=(width, height))
+    # undistort_and_save_image(
+    #    'test_images_undist_perspective',
+    #    'test_images/straight_lines1.jpg', mtx, dist
+    # )
+    # threshold_binary = combined_gradient_color_threshold(undist)
     f, (ax1, ax2) = plt.subplots(2, 1, figsize=(24, 9))
-    #f.tight_layout()
+    f.tight_layout()
 
-    ax1.imshow(img)
+    ax1.imshow(undist)
     ax1.set_title('Original Image', fontsize=40)
-
-    ax2.imshow(threshold_binary)
+    ax2.imshow(p_transformed)
     ax2.set_title('Pipeline Result', fontsize=40)
     plt.subplots_adjust(left=0., right=1, top=0.9, bottom=0.)
     plt.show()
