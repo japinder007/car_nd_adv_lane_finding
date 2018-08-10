@@ -191,19 +191,43 @@ def combined_gradient_color_threshold(img, grad_x_thresh=(20, 100), color_thresh
     return combined_binary
 
 
-def perspective_transform(undist, src_points, dst_points, img_shape):
+def get_perspective_transform_matrix(
+    mtx,
+    dist,
+    file_name='test_images/straight_lines1.jpg',
+    src_points=np.float32([
+        [576.04, 464.487], [707.079, 464.487],
+        [268.552, 675.317], [1034.03, 675.317]]
+    ),
+    dst_points=np.float32([
+        [268.552, 0],
+        [1034.03, 0],
+        [268.552, 675.317],
+        [1034.03, 675.317],
+    ])
+):
     """
     Applies perspective transform to undist, mapping src_points to dst_points.
     This produces an image of the same size as the original image.
 
-    :param undist (numpy array) - Undistorted image.
+    :param mtx (numpy array) - Matrix for removing distortion.
+    :param dist (numpy array) - Matrix for displacement.
+    :param file_name (str) - Name of the image file.
     :param src_points (list[points]) - List of points in the source image.
         These are assumed to be four points provided in the following order -
         Top left, top right, bottom left, bottom right.
-    :return returns the image after applying the perspective transform.
+    :param dst_points (list[points]) - Points with 1:1 mapping to src_points.
+
+    :return returns the matrix which produces the perspective transform.
     """
-    M = cv2.getPerspectiveTransform(src_points, dst_points)
-    return cv2.warpPerspective(undist, M, img_shape)
+    img = mpimg.imread(file_name)
+    undist = cv2.undistort(img, mtx, dist, None, mtx)
+
+    gray = convert_to_grayscale(undist)
+    # img_size is width x height :-(.
+    width = gray.shape[1]
+    height = gray.shape[0]
+    return cv2.getPerspectiveTransform(src_points, dst_points)
 
 
 def draw_lines(img, lines, color=[255, 0, 0], thickness=2):
@@ -220,6 +244,131 @@ def get_points_for_lanes(src):
         [(src[0][0], src[0][1], src[2][0], src[2][1])],
         [(src[1][0], src[1][1], src[3][0], src[3][1])],
     ]
+
+
+def hist(img):
+    # Grab only the bottom half of the image
+    # Lane lines are likely to be mostly vertical nearest to the car
+    bottom_half = img[img.shape[0]//2:,:]
+    # Sum across image pixels vertically - make sure to set `axis`
+    # i.e. the highest areas of vertical lines should be larger values
+    histogram = np.sum(bottom_half, axis=0)
+    return histogram
+
+
+def find_lane_pixels(binary_warped):
+    # Take a histogram of the bottom half of the image
+    histogram = np.sum(binary_warped[binary_warped.shape[0]//2:,:], axis=0)
+    # Create an output image to draw on and visualize the result
+    out_img = np.dstack((binary_warped, binary_warped, binary_warped))
+    # Find the peak of the left and right halves of the histogram
+    # These will be the starting point for the left and right lines
+    midpoint = np.int(histogram.shape[0]//2)
+    leftx_base = np.argmax(histogram[:midpoint])
+    rightx_base = np.argmax(histogram[midpoint:]) + midpoint
+
+    # HYPERPARAMETERS
+    # Choose the number of sliding windows
+    nwindows = 9
+    # Set the width of the windows +/- margin
+    margin = 100
+    # Set minimum number of pixels found to recenter window
+    minpix = 50
+
+    # Set height of windows - based on nwindows above and image shape
+    window_height = np.int(binary_warped.shape[0]//nwindows)
+    # Identify the x and y positions of all nonzero pixels in the image
+    nonzero = binary_warped.nonzero()
+    nonzeroy = np.array(nonzero[0])
+    nonzerox = np.array(nonzero[1])
+    # Current positions to be updated later for each window in nwindows
+    leftx_current = leftx_base
+    rightx_current = rightx_base
+
+    # Create empty lists to receive left and right lane pixel indices
+    left_lane_inds = []
+    right_lane_inds = []
+
+    # Step through the windows one by one
+    for window in range(nwindows):
+        # Identify window boundaries in x and y (and right and left)
+        win_y_low = binary_warped.shape[0] - (window+1)*window_height
+        win_y_high = binary_warped.shape[0] - window*window_height
+        win_xleft_low = leftx_current - margin
+        win_xleft_high = leftx_current + margin
+        win_xright_low = rightx_current - margin
+        win_xright_high = rightx_current + margin
+
+        # Draw the windows on the visualization image
+        #cv2.rectangle(out_img, (win_xleft_low, win_y_low), (win_xleft_high, win_y_high), (0, 255, 0), 2)
+        #cv2.rectangle(out_img, (win_xright_low, win_y_low), (win_xright_high, win_y_high), (0, 255, 0), 2)
+
+        # Identify the nonzero pixels in x and y within the window #
+        good_left_inds = (
+            (nonzeroy >= win_y_low) & (nonzeroy < win_y_high) &
+            (nonzerox >= win_xleft_low) & (nonzerox < win_xleft_high)
+        ).nonzero()[0]
+        good_right_inds = (
+            (nonzeroy >= win_y_low) & (nonzeroy < win_y_high) &
+            (nonzerox >= win_xright_low) & (nonzerox < win_xright_high)
+        ).nonzero()[0]
+
+        # Append these indices to the lists
+        left_lane_inds.append(good_left_inds)
+        right_lane_inds.append(good_right_inds)
+
+        # If you found > minpix pixels, recenter next window on their mean position
+        if len(good_left_inds) > minpix:
+            leftx_current = np.int(np.mean(nonzerox[good_left_inds]))
+        if len(good_right_inds) > minpix:
+            rightx_current = np.int(np.mean(nonzerox[good_right_inds]))
+
+    # Concatenate the arrays of indices (previously was a list of lists of pixels)
+    try:
+        left_lane_inds = np.concatenate(left_lane_inds)
+        right_lane_inds = np.concatenate(right_lane_inds)
+    except ValueError:
+        # Avoids an error if the above is not implemented fully
+        pass
+
+    # Extract left and right line pixel positions
+    leftx = nonzerox[left_lane_inds]
+    lefty = nonzeroy[left_lane_inds]
+    rightx = nonzerox[right_lane_inds]
+    righty = nonzeroy[right_lane_inds]
+
+    return leftx, lefty, rightx, righty, out_img
+
+
+def fit_polynomial(binary_warped):
+    # Find our lane pixels first
+    leftx, lefty, rightx, righty, out_img = find_lane_pixels(binary_warped)
+
+    # Fit a second order polynomial to each using `np.polyfit`
+    left_fit = np.polyfit(lefty, leftx, 2)
+    right_fit = np.polyfit(righty, rightx, 2)
+
+    # Generate x and y values for plotting
+    ploty = np.linspace(0, binary_warped.shape[0]-1, binary_warped.shape[0])
+    try:
+        left_fitx = left_fit[0]*ploty**2 + left_fit[1]*ploty + left_fit[2]
+        right_fitx = right_fit[0]*ploty**2 + right_fit[1]*ploty + right_fit[2]
+    except TypeError:
+        # Avoids an error if `left` and `right_fit` are still none or incorrect
+        print('The function failed to fit a line!')
+        left_fitx = 1*ploty**2 + 1*ploty
+        right_fitx = 1*ploty**2 + 1*ploty
+
+    # Visualization #
+    # Colors in the left and right lane regions
+    out_img[lefty, leftx] = [255, 0, 0]
+    out_img[righty, rightx] = [0, 0, 255]
+
+    # Plots the left and right polynomials on the lane lines
+    plt.plot(left_fitx, ploty, color='yellow')
+    plt.plot(right_fitx, ploty, color='yellow')
+
+    return out_img
 
 
 if __name__ == '__main__':
@@ -242,71 +391,39 @@ if __name__ == '__main__':
         ret, mtx, dist, rvecs, tvecs = callibrate_camera(file_names)
         pickle.dump({'mtx': mtx, 'dist': dist}, open(pickle_file_name, 'wb'))
 
-    # for f in file_names:
-    #    undistort_and_save_image('camera_cal_undist', f, mtx, dist)
-    img = mpimg.imread('test_images/straight_lines1.jpg')
-    undist = cv2.undistort(img, mtx, dist, None, mtx)
-    src_points = np.float32([
-        [521.697, 500.501],
-        [764.666, 500.501],
-        [234.025, 699.821],
-        [1064.43, 699.821]
-    ])
-    src_points = np.float32([
-        [596.376, 450.54],
-        [677.695, 450.09],
-        [234.025, 699.821],
-        [1064.43, 699.821]
-    ])
-    src_points = np.float32([
-        [560.614, 475.258],
-        [723.645, 475.258],
-        [234.025, 699.821],
-        [1068.54, 699.821]
-    ])
-    src_points = np.float32([
-        [576.04, 464.487],
-        [707.079, 464.487],
-        [268.552, 675.317],
-        [1034.03, 675.317]
-    ])
+
     # draw_lines(undist, [
     #    [(521.697, 500.501, 234.025, 699.821)],
     #    [(764.666, 500.501, 1064.43, 699.821)]
     # ])
-    draw_lines(undist, get_points_for_lanes(src_points))
+    # draw_lines(undist, get_points_for_lanes(src_points))
 
-    # Compute the matrix to transform src_points to dst_points. The first point
-    # is the axis along the width and the second is along the height.
-    offset = 10
-    gray = convert_to_grayscale(undist)
-    # img_size is width x height :-(.
+    p_transform_matrix = get_perspective_transform_matrix(mtx, dist)
+    img = mpimg.imread('test_images/straight_lines1.jpg')
+    undist = cv2.undistort(img, mtx, dist, None, mtx)
+
+    threshold_binary = combined_gradient_color_threshold(undist)
+
+    # Now draw the warped image.
+    gray = convert_to_grayscale(img)
     width = gray.shape[1]
     height = gray.shape[0]
-    dst_points = np.float32([
-        [offset, offset],
-        [width - offset, offset],
-        [offset, height - offset],
-        [width - offset, height - offset],
-    ])
-    dst_points = np.float32([
-        [268.552, offset],
-        [1034.03, offset],
-        [268.552, 675.317],
-        [1034.03, 675.317],
-    ])
-    p_transformed = perspective_transform(undist, src_points, dst_points, img_shape=(width, height))
+    p_transformed = cv2.warpPerspective(undist, p_transform_matrix, (width, height), flags=cv2.INTER_LINEAR)
+
     # undistort_and_save_image(
     #    'test_images_undist_perspective',
     #    'test_images/straight_lines1.jpg', mtx, dist
     # )
     # threshold_binary = combined_gradient_color_threshold(undist)
+    histogram = hist(p_transformed)
+    #plt.plot(histogram)
+    #plt.show()
     f, (ax1, ax2) = plt.subplots(2, 1, figsize=(24, 9))
     f.tight_layout()
-
-    ax1.imshow(undist)
-    ax1.set_title('Original Image', fontsize=40)
-    ax2.imshow(p_transformed)
-    ax2.set_title('Pipeline Result', fontsize=40)
+    ax1.imshow(img)
+    ax1.set_title('Original Image', fontsize=10)
+    #ax2.imshow(out_img)
+    ax2.set_title('Pipeline Result', fontsize=10)
+    ax2.plot(histogram)
     plt.subplots_adjust(left=0., right=1, top=0.9, bottom=0.)
     plt.show()
