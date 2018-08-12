@@ -8,6 +8,14 @@ import pickle
 from PIL import Image
 import os
 
+DEFAULT_COLOR_THRESHOLD = (190, 255)
+DEFAULT_ABS_THRESHOLD = (0, 255)
+DEFAULT_MAG_THRESHOLD = (0, 255)
+DEFAULT_DIR_THRESHOLD = (0, np.pi/6)
+
+DEFAULT_COLOR_SOBEL_KERNEL = 3
+DEFAULT_DIR_SOBEL_KERNEL = 3
+DEFAULT_MAG_SOBEL_KERNEL = 3
 # Notes on shape.
 # img_file = 'camera_cal/calibration1.jpg'
 # img.shape
@@ -86,7 +94,7 @@ def undistort_and_save_image(output_dir, file_name, mtx, dist):
     im.save(full_path)
 
 
-def sobel_abs_threshold(img, orient='x', thresh_min=0, thresh_max=255):
+def sobel_abs_threshold(img, orient='x', thresh=DEFAULT_ABS_THRESHOLD):
     """
     Return the mage after applying threshold on sobel.
     :param img (numpy array) - image.
@@ -112,11 +120,11 @@ def sobel_abs_threshold(img, orient='x', thresh_min=0, thresh_max=255):
     # 5) Create a mask of 1's where the scaled gradient magnitude
     # is > thresh_min and < thresh_max
     result = np.zeros_like(scaled_sobel)
-    result[(scaled_sobel >= thresh_min) & (scaled_sobel <= thresh_max)] = 1
+    result[(scaled_sobel >= thresh[0]) & (scaled_sobel <= thresh[1])] = 1
     return result
 
 
-def sobel_mag_threshold(img, sobel_kernel=3, mag_thresh=(0, 255)):
+def sobel_mag_threshold(img, sobel_kernel=DEFAULT_MAG_SOBEL_KERNEL, mag_thresh=DEFAULT_MAG_THRESHOLD):
     """
     Return the image after applying threshold on magnitude of sobel.
     :param img (numpy array) - image.
@@ -144,7 +152,7 @@ def sobel_mag_threshold(img, sobel_kernel=3, mag_thresh=(0, 255)):
     return binary_output
 
 
-def dir_threshold(img, sobel_kernel=3, thresh=(0, np.pi/2)):
+def dir_threshold(img, sobel_kernel=DEFAULT_DIR_SOBEL_KERNEL, thresh=DEFAULT_DIR_THRESHOLD):
     # Grayscale
     gray = convert_to_grayscale(img)
     # Calculate the x and y gradients
@@ -160,7 +168,7 @@ def dir_threshold(img, sobel_kernel=3, thresh=(0, np.pi/2)):
     return binary_output
 
 
-def color_threshold(img, thresh=(0, 255)):
+def color_threshold(img, thresh=DEFAULT_COLOR_THRESHOLD):
     hls = cv2.cvtColor(img, cv2.COLOR_RGB2HLS)
     s_channel = hls[:, :, 2]
     binary_output = np.zeros_like(s_channel)
@@ -168,27 +176,41 @@ def color_threshold(img, thresh=(0, 255)):
     return binary_output
 
 
-def combined_gradient_color_threshold(img, grad_x_thresh=(20, 100), color_thresh=(170, 255)):
-    hls = cv2.cvtColor(img, cv2.COLOR_RGB2HLS)
-    s_channel = hls[:, :, 2]
-    # Threshold color channel
-    s_binary = np.zeros_like(s_channel)
-    s_binary[(s_channel >= color_thresh[0]) & (s_channel <= color_thresh[1])] = 1
-
-    gray = convert_to_grayscale(img)
-    # Take the derivative in x
-    sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0)
-    # Absolute x derivative to accentuate lines away from horizontal
-    abs_sobelx = np.absolute(sobelx)
-    scaled_sobel = np.uint8(255*abs_sobelx/np.max(abs_sobelx))
-    # Threshold x gradient
-    sxbinary = np.zeros_like(scaled_sobel)
-    sxbinary[(scaled_sobel >= grad_x_thresh[0]) & (scaled_sobel <= grad_x_thresh[1])] = 1
-
+def combined_gradient_color_threshold(
+    img,
+    grad_x_thresh=DEFAULT_ABS_THRESHOLD,
+    color_thresh=DEFAULT_COLOR_THRESHOLD
+):
+    s_binary = color_threshold(img, color_thresh)
+    sxbinary = sobel_abs_threshold(
+        img, orient='x', thresh=grad_x_thresh
+    )
     # Combine color and x gradient threshold results.
     combined_binary = np.zeros_like(sxbinary)
     combined_binary[(s_binary == 1) | (sxbinary == 1)] = 1
     return combined_binary
+
+
+def combined_dir_color_threshold(
+    img,
+    grad_x_thresh=DEFAULT_ABS_THRESHOLD,
+    dir_thresh=DEFAULT_DIR_THRESHOLD
+):
+    s_binary = color_threshold(img, color_thresh)
+    threshold_binary = dir_threshold(img, thresh=dir_thresh)
+    combined_binary = np.zeros_like(threshold_binary)
+    combined_binary[(s_binary == 1) | (threshold_binary == 1)] = 1
+    return combined_binary
+
+
+"""
+dst_points=np.float32([
+    [268.552, 10],
+    [1034.03, 10],
+    [268.552, 675.317],
+    [1034.03, 675.317],
+])
+"""
 
 
 def get_perspective_transform_matrix(
@@ -200,10 +222,10 @@ def get_perspective_transform_matrix(
         [268.552, 675.317], [1034.03, 675.317]]
     ),
     dst_points=np.float32([
-        [268.552, 0],
-        [1034.03, 0],
-        [268.552, 675.317],
-        [1034.03, 675.317],
+        [150, 150],
+        [1000, 150],
+        [150, 700],
+        [1000, 700],
     ])
 ):
     """
@@ -300,18 +322,16 @@ def find_lane_pixels(binary_warped):
         win_xright_high = rightx_current + margin
 
         # Draw the windows on the visualization image
-        #cv2.rectangle(out_img, (win_xleft_low, win_y_low), (win_xleft_high, win_y_high), (0, 255, 0), 2)
-        #cv2.rectangle(out_img, (win_xright_low, win_y_low), (win_xright_high, win_y_high), (0, 255, 0), 2)
+        cv2.rectangle(out_img,(win_xleft_low,win_y_low),
+            (win_xleft_high,win_y_high),(0,255,0), 2)
+        cv2.rectangle(out_img,(win_xright_low,win_y_low),
+            (win_xright_high,win_y_high),(0,255,0), 2)
 
         # Identify the nonzero pixels in x and y within the window #
-        good_left_inds = (
-            (nonzeroy >= win_y_low) & (nonzeroy < win_y_high) &
-            (nonzerox >= win_xleft_low) & (nonzerox < win_xleft_high)
-        ).nonzero()[0]
-        good_right_inds = (
-            (nonzeroy >= win_y_low) & (nonzeroy < win_y_high) &
-            (nonzerox >= win_xright_low) & (nonzerox < win_xright_high)
-        ).nonzero()[0]
+        good_left_inds = ((nonzeroy >= win_y_low) & (nonzeroy < win_y_high) &
+        (nonzerox >= win_xleft_low) &  (nonzerox < win_xleft_high)).nonzero()[0]
+        good_right_inds = ((nonzeroy >= win_y_low) & (nonzeroy < win_y_high) &
+        (nonzerox >= win_xright_low) &  (nonzerox < win_xright_high)).nonzero()[0]
 
         # Append these indices to the lists
         left_lane_inds.append(good_left_inds)
@@ -349,7 +369,7 @@ def fit_polynomial(binary_warped):
     right_fit = np.polyfit(righty, rightx, 2)
 
     # Generate x and y values for plotting
-    ploty = np.linspace(0, binary_warped.shape[0]-1, binary_warped.shape[0])
+    ploty = np.linspace(0, binary_warped.shape[0]-1, binary_warped.shape[0] )
     try:
         left_fitx = left_fit[0]*ploty**2 + left_fit[1]*ploty + left_fit[2]
         right_fitx = right_fit[0]*ploty**2 + right_fit[1]*ploty + right_fit[2]
@@ -359,16 +379,35 @@ def fit_polynomial(binary_warped):
         left_fitx = 1*ploty**2 + 1*ploty
         right_fitx = 1*ploty**2 + 1*ploty
 
-    # Visualization #
+    ## Visualization ##
     # Colors in the left and right lane regions
     out_img[lefty, leftx] = [255, 0, 0]
     out_img[righty, rightx] = [0, 0, 255]
 
     # Plots the left and right polynomials on the lane lines
-    plt.plot(left_fitx, ploty, color='yellow')
-    plt.plot(right_fitx, ploty, color='yellow')
+    #plt.plot(left_fitx, ploty, color='yellow')
+    #plt.plot(right_fitx, ploty, color='yellow')
 
-    return out_img
+    return out_img, left_fitx, right_fitx
+
+
+def transform_image(file_name, mtx, dist, p_transform_matrix,
+                    grad_x_thresh=DEFAULT_ABS_THRESHOLD,
+                    color_threshold=DEFAULT_COLOR_THRESHOLD):
+    img = mpimg.imread(file_name)
+    undist = cv2.undistort(img, mtx, dist, None, mtx)
+    threshold_binary = combined_gradient_color_threshold(
+        undist, grad_x_thresh, color_threshold
+    )
+
+    # Now draw the warped image.
+    height, width = img.shape[:2]
+    p_transformed = cv2.warpPerspective(
+        threshold_binary, p_transform_matrix, (width, height),
+        flags=cv2.INTER_LINEAR
+    )
+    out_img, left_fitx, right_fitx = fit_polynomial(p_transformed)
+    return img, undist, threshold_binary, p_transformed, out_img, left_fitx, right_fitx
 
 
 if __name__ == '__main__':
@@ -377,6 +416,7 @@ if __name__ == '__main__':
                         help='File to store mtx and dist into')
     parser.add_argument('-i', '--index', default=0, type=int,
                         help='Index into file_names')
+    parser.add_argument('-t', '--test_image_name', type=str, help='Image to transform')
     args = parser.parse_args()
     pickle_file_name = args.pickle_file_name
     file_names = glob.glob('camera_cal/calibration*.jpg')
@@ -391,7 +431,6 @@ if __name__ == '__main__':
         ret, mtx, dist, rvecs, tvecs = callibrate_camera(file_names)
         pickle.dump({'mtx': mtx, 'dist': dist}, open(pickle_file_name, 'wb'))
 
-
     # draw_lines(undist, [
     #    [(521.697, 500.501, 234.025, 699.821)],
     #    [(764.666, 500.501, 1064.43, 699.821)]
@@ -399,31 +438,27 @@ if __name__ == '__main__':
     # draw_lines(undist, get_points_for_lanes(src_points))
 
     p_transform_matrix = get_perspective_transform_matrix(mtx, dist)
-    img = mpimg.imread('test_images/straight_lines1.jpg')
-    undist = cv2.undistort(img, mtx, dist, None, mtx)
+    img, undist, threshold_binary, p_transformed, out_img, left_fitx, right_fitx = transform_image(
+        file_name=args.test_image_name, mtx=mtx, dist=dist,
+        p_transform_matrix=p_transform_matrix,
+        color_threshold=(150, 255),
+        grad_x_thresh=(20, 255)
+    )
 
-    threshold_binary = combined_gradient_color_threshold(undist)
-
-    # Now draw the warped image.
-    gray = convert_to_grayscale(img)
-    width = gray.shape[1]
-    height = gray.shape[0]
-    p_transformed = cv2.warpPerspective(undist, p_transform_matrix, (width, height), flags=cv2.INTER_LINEAR)
-
-    # undistort_and_save_image(
-    #    'test_images_undist_perspective',
-    #    'test_images/straight_lines1.jpg', mtx, dist
-    # )
-    # threshold_binary = combined_gradient_color_threshold(undist)
-    histogram = hist(p_transformed)
-    #plt.plot(histogram)
-    #plt.show()
-    f, (ax1, ax2) = plt.subplots(2, 1, figsize=(24, 9))
+    f, axs = plt.subplots(2, 2, figsize=(24, 10))
+    [ax1, ax2, ax3, ax4] = plt.gcf().get_axes()
     f.tight_layout()
     ax1.imshow(img)
     ax1.set_title('Original Image', fontsize=10)
-    #ax2.imshow(out_img)
-    ax2.set_title('Pipeline Result', fontsize=10)
-    ax2.plot(histogram)
+    ax2.imshow(threshold_binary)
+    ax2.set_title('Thresholded', fontsize=10)
+    ax3.imshow(p_transformed)
+    ax3.set_title('Perspective', fontsize=10)
+    ax4.imshow(out_img)
+    ploty = np.linspace(0, out_img.shape[0]-1, out_img.shape[0] )
+    ax4.plot(left_fitx, ploty, color='yellow')
+    ax4.plot(right_fitx, ploty, color='yellow')
+    ax4.set_title('Pipeline result', fontsize=10)
     plt.subplots_adjust(left=0., right=1, top=0.9, bottom=0.)
+    #plt.imshow(out_img)
     plt.show()
