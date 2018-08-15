@@ -249,7 +249,7 @@ def get_perspective_transform_matrix(
     # img_size is width x height :-(.
     width = gray.shape[1]
     height = gray.shape[0]
-    return cv2.getPerspectiveTransform(src_points, dst_points)
+    return (cv2.getPerspectiveTransform(src_points, dst_points), cv2.getPerspectiveTransform(dst_points, src_points))
 
 
 def draw_lines(img, lines, color=[255, 0, 0], thickness=2):
@@ -279,6 +279,17 @@ def hist(img):
 
 
 def find_lane_pixels(binary_warped):
+    """
+    Returns the left and right lane pixels.
+
+    :param binary_warped - Warped image.
+
+    Returns (leftx, lefty, rightx, righty, out_img) where
+        leftx - x coordinates of the points in the left lane.
+        rightx - y coordinates of the points in the left lane.
+        rightx - x coordinates of the points in the right lane.
+        righty - y coordinates of the points in the right lane.
+    """
     # Take a histogram of the bottom half of the image
     histogram = np.sum(binary_warped[binary_warped.shape[0]//2:,:], axis=0)
     # Create an output image to draw on and visualize the result
@@ -379,35 +390,162 @@ def fit_polynomial(binary_warped):
         left_fitx = 1*ploty**2 + 1*ploty
         right_fitx = 1*ploty**2 + 1*ploty
 
-    ## Visualization ##
+    # Visualization #
     # Colors in the left and right lane regions
     out_img[lefty, leftx] = [255, 0, 0]
     out_img[righty, rightx] = [0, 0, 255]
 
     # Plots the left and right polynomials on the lane lines
-    #plt.plot(left_fitx, ploty, color='yellow')
-    #plt.plot(right_fitx, ploty, color='yellow')
+    # plt.plot(left_fitx, ploty, color='yellow')
+    # plt.plot(right_fitx, ploty, color='yellow')
 
-    return out_img, left_fitx, right_fitx
+    return out_img, left_fitx, right_fitx, left_fit, right_fit
 
 
-def transform_image(file_name, mtx, dist, p_transform_matrix,
-                    grad_x_thresh=DEFAULT_ABS_THRESHOLD,
-                    color_threshold=DEFAULT_COLOR_THRESHOLD):
-    img = mpimg.imread(file_name)
-    undist = cv2.undistort(img, mtx, dist, None, mtx)
-    threshold_binary = combined_gradient_color_threshold(
-        undist, grad_x_thresh, color_threshold
+def fit_poly(img_shape, leftx, lefty, rightx, righty):
+    # TO-DO: Fit a second order polynomial to each with np.polyfit() ###
+    left_fit = np.polyfit(lefty, leftx, 2)
+    right_fit = np.polyfit(righty, rightx, 2)
+    # Generate x and y values for plotting
+    ploty = np.linspace(0, img_shape[0]-1, img_shape[0])
+    # TO-DO: Calc both polynomials using ploty, left_fit and right_fit ###
+    left_fitx = left_fit[0] * ploty ** 2 + left_fit[1] * ploty + left_fit[2]
+    right_fitx = right_fit[0] * ploty ** 2 + right_fit[1] * ploty + right_fit[2]
+
+    return left_fitx, right_fitx, ploty, left_fit, right_fit
+
+
+def search_around_poly(binary_warped, left_fit, right_fit):
+    # HYPERPARAMETER
+    # Choose the width of the margin around the previous polynomial to search
+    # The quiz grader expects 100 here, but feel free to tune on your own!
+    margin = 100
+
+    # Grab activated pixels
+    nonzero = binary_warped.nonzero()
+    nonzeroy = np.array(nonzero[0])
+    nonzerox = np.array(nonzero[1])
+
+    # TO-DO: Set the area of search based on activated x-values ###
+    # within the +/- margin of our polynomial function ###
+    # Hint: consider the window areas for the similarly named variables ###
+    # in the previous quiz, but change the windows to our new search area ###
+    left_lane_inds = ((nonzerox > (left_fit[0] * (nonzeroy ** 2) + left_fit[1] * nonzeroy +
+                    left_fit[2] - margin)) & (nonzerox < (left_fit[0] * (nonzeroy ** 2) +
+                    left_fit[1]*nonzeroy + left_fit[2] + margin)))
+    right_lane_inds = ((nonzerox > (right_fit[0] * (nonzeroy ** 2) + right_fit[1] * nonzeroy +
+                    right_fit[2] - margin)) & (nonzerox < (right_fit[0] * (nonzeroy ** 2) +
+                    right_fit[1] * nonzeroy + right_fit[2] + margin)))
+
+    # Again, extract left and right line pixel positions
+    leftx = nonzerox[left_lane_inds]
+    lefty = nonzeroy[left_lane_inds]
+    rightx = nonzerox[right_lane_inds]
+    righty = nonzeroy[right_lane_inds]
+
+    # Fit new polynomials
+    left_fitx, right_fitx, ploty, left_fit_next, right_fit_next = fit_poly(binary_warped.shape, leftx, lefty, rightx, righty)
+
+    # Visualization #
+    # Create an image to draw on and an image to show the selection window
+    out_img = np.dstack((binary_warped, binary_warped, binary_warped))*255
+    window_img = np.zeros_like(out_img)
+    # Color in left and right line pixels
+    out_img[nonzeroy[left_lane_inds], nonzerox[left_lane_inds]] = [255, 0, 0]
+    out_img[nonzeroy[right_lane_inds], nonzerox[right_lane_inds]] = [0, 0, 255]
+
+    # Generate a polygon to illustrate the search window area
+    # And recast the x and y points into usable format for cv2.fillPoly()
+    left_line_window1 = np.array([np.transpose(np.vstack([left_fitx - margin, ploty]))])
+    left_line_window2 = np.array([np.flipud(np.transpose(np.vstack([left_fitx + margin,
+                              ploty])))])
+    left_line_pts = np.hstack((left_line_window1, left_line_window2))
+    right_line_window1 = np.array([np.transpose(np.vstack([right_fitx-margin, ploty]))])
+    right_line_window2 = np.array([np.flipud(np.transpose(np.vstack([right_fitx+margin,
+                              ploty])))])
+    right_line_pts = np.hstack((right_line_window1, right_line_window2))
+
+    # Draw the lane onto the warped blank image
+    cv2.fillPoly(window_img, np.int_([left_line_pts]), (0,255, 0))
+    cv2.fillPoly(window_img, np.int_([right_line_pts]), (0,255, 0))
+    result = cv2.addWeighted(out_img, 1, window_img, 0.3, 0)
+
+    return result, left_fitx, right_fitx, left_fit_next, right_fit_next, leftx, lefty, rightx, righty
+
+
+def get_curvature(fit, y):
+    """
+    Returns the curvature for a given fit and ploty values.
+
+    :param fit (array) - Coefficients of second order polynomial fit to the lane.
+    :param ploty (array) - Values of y along which to evaluate the curvature on.
+
+    :return array - Values of curvature at the corresponding ploty values.
+    """
+    # ((1 + (2Ay + B) ^ 2)^3/2)/2A
+    A = fit[0]
+    B = fit[1]
+    t1 = 2 * A * y * y + B
+    t2 = np.square(t1)
+    t3 = (1 + t2)
+    t4 = np.power(t3, 1.5)
+    t5 = t4 / np.absolute(2 * A)
+    return t5
+
+
+def draw_lane(
+    original_img, binary_img, left_fit, right_fit, inv_perspective_trans
+):
+    new_img = np.copy(original_img)
+    if left_fit is None or right_fit is None:
+        return original_img
+
+    # Create an image to draw the lines on
+    warp_zero = np.zeros_like(binary_img).astype(np.uint8)
+    color_warp = np.dstack((warp_zero, warp_zero, warp_zero))
+
+    h, w = binary_img.shape
+    ploty = np.linspace(0, h-1, num=h)
+    left_fitx = left_fit[0] * ploty ** 2 + left_fit[1] * ploty + left_fit[2]
+    right_fitx = right_fit[0] * ploty ** 2 + right_fit[1] * ploty + right_fit[2]
+
+    # Prepare data for cv2.fillPoly()
+    pts_left = np.array([np.transpose(np.vstack([left_fitx, ploty]))])
+    pts_right = np.array([np.flipud(np.transpose(np.vstack([right_fitx, ploty])))])
+    pts = np.hstack((pts_left, pts_right))
+
+    # Draw the lane onto the warped blank image
+    cv2.fillPoly(color_warp, np.int_([pts]), (0, 255, 0))
+    cv2.polylines(
+        color_warp, np.int32([pts_left]), isClosed=False, color=(255, 0, 255),
+        thickness=15
+    )
+    cv2.polylines(
+        color_warp, np.int32([pts_right]), isClosed=False, color=(0, 255, 255),
+        thickness=15
     )
 
+    newwarp = cv2.warpPerspective(color_warp, inv_perspective_trans, (w, h))
+    result = cv2.addWeighted(new_img, 1, newwarp, 0.5, 0)
+    return result
+
+
+def transform_image(img, mtx, dist, p_transform_matrix,
+                    grad_x_thresh=DEFAULT_ABS_THRESHOLD,
+                    color_threshold=DEFAULT_COLOR_THRESHOLD):
+    undist = cv2.undistort(img, mtx, dist, None, mtx)
     # Now draw the warped image.
     height, width = img.shape[:2]
     p_transformed = cv2.warpPerspective(
-        threshold_binary, p_transform_matrix, (width, height),
+        undist, p_transform_matrix, (width, height),
         flags=cv2.INTER_LINEAR
     )
-    out_img, left_fitx, right_fitx = fit_polynomial(p_transformed)
-    return img, undist, threshold_binary, p_transformed, out_img, left_fitx, right_fitx
+    threshold_binary = combined_gradient_color_threshold(
+        p_transformed, grad_x_thresh, color_threshold
+    )
+
+    out_img, left_fitx, right_fitx, left_fit, right_fit = fit_polynomial(threshold_binary)
+    return undist, threshold_binary, p_transformed, out_img, left_fitx, right_fitx, left_fit, right_fit
 
 
 if __name__ == '__main__':
@@ -437,9 +575,10 @@ if __name__ == '__main__':
     # ])
     # draw_lines(undist, get_points_for_lanes(src_points))
 
-    p_transform_matrix = get_perspective_transform_matrix(mtx, dist)
-    img, undist, threshold_binary, p_transformed, out_img, left_fitx, right_fitx = transform_image(
-        file_name=args.test_image_name, mtx=mtx, dist=dist,
+    p_transform_matrix, p_transform_matrix_inv = get_perspective_transform_matrix(mtx, dist)
+    img = mpimg.imread(args.test_image_name)
+    undist, threshold_binary, p_transformed, out_img, left_fitx, right_fitx, left_fit, right_fit = transform_image(
+        img, mtx=mtx, dist=dist,
         p_transform_matrix=p_transform_matrix,
         color_threshold=(150, 255),
         grad_x_thresh=(20, 255)
